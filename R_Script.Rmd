@@ -1,0 +1,562 @@
+---
+title: "Predicting Cancer related Malignant Cell Growth : Assignment 4"
+author: "Saira Asif", "Lisa Tran", "Zuhaa Ali"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggplot2)
+library(rpart)
+library(tree)
+#install.packages("rpart.plot")
+library(rpart.plot)
+library(lars)
+library(glmnet)
+library(caret)
+library(plotly)
+library(randomForest)
+library(ipred)
+#install.packages("Metrics")
+library(Metrics)
+library(class)
+library(e1071)
+library(readr)
+library(MASS)
+#install.packages("mlbench")
+library(mlbench)
+
+library(dplyr)
+```
+
+## DATA
+
+```{r}
+# reading in training and testing dataset
+tumor_train <- read.csv("trainset.csv")
+tumor_test <- read.csv("testset.csv")
+
+tumor_train <- read.csv("/Users/sairaasif49/Downloads/trainset.csv")
+tumor_test <- read.csv("/Users/sairaasif49/Downloads//testset.csv")
+
+# No missing/NA values is any columns
+apply(tumor_train, 2, function(x){sum(is.na(x))})
+
+# No 0s in the predictor columns
+apply(tumor_train, 2, function(x){sum(x==0)})
+
+#convert status to factor
+tumor_train$status<-as.factor(tumor_train$status)
+tumor_test$status<-as.factor(tumor_test$status)
+
+# Creating a squared data frame to exolore quadratic effects in our models
+sq_train <- apply(tumor_train[2:31], 2, function(x)x^2)
+sq_test <- apply(tumor_test[2:31], 2, function(x)x^2)
+
+# Renaming the columns of squared matrix
+colnames(sq_train) <- paste(colnames(sq_train), "^2", sep = "")
+colnames(sq_test) <- paste(colnames(sq_test), "^2", sep = "")
+
+# Combining the two dataframes together for modeling 
+tumor_trainSA <- cbind(tumor_train, sq_train)
+tumor_testSA <- cbind(tumor_test, sq_test)
+
+```
+
+## elastic net (include Lasso and Ridge in your search grid) (Saira )
+
+LASSO package glmnet requires the the response variable to be a vector and the set of predictor variables to be of the class data.matrix. Variance is different across predictors, so it has not been standardized, however glmnet automatically standardizes the variables. The results also show that the highest model accuracy was given when alpha was 0, suggesting that ridge regression is best for this dataset
+
+```{r}
+#define response variable as vector 
+status <- tumor_trainSA$status
+# dim is NULL as it is a vector, not a matrix
+dim(status)
+
+#define matrix of predictor variables
+xs <- data.matrix(tumor_trainSA[, -1])
+dim(xs)
+# Variance is different across predictors, so it has not been standardized, however glmnet automatically standardizes the variables
+apply(xs, 2, var)
+
+# ELASTIC NET
+
+set.seed(12)
+
+#efine the type of re-sampling as cross-validation using 10-fold method
+enet <- trainControl(method = "cv", number = 10)
+
+# Allows us to have more alpha values, from 0 to 1, to include both lasso and ridge regression in the analysis.
+elasticGrid <- expand.grid(.alpha = seq(0, 1, length = 10), .lambda = seq(.5, 7.5, 1))
+
+#cv.glmnet for computing penalized linear regression models.
+def_elnet = train(status ~ ., data=tumor_trainSA, method = "glmnet", trControl = enet, tuneGrid = elasticGrid)
+
+# results for each combination of alpha and lambda
+def_elnet$results
+
+# Figure 1 : Depicts the Accuracy of the model for values of alpha and lambda.
+#lower alpha and lambda - better models
+par(mfrow = c(1,2))
+plot(def_elnet$results[ ,c(1,3)])
+plot(def_elnet$results[ ,c(2,3)])
+
+## highest possible Accuracy - best model
+max_acc <- which.max(def_elnet$results[ ,3])
+# The accuracy of this model is 94.38
+def_elnet$results[max_acc,] 
+
+# ridge regression seems the best for this dataset (alpha =0)
+def_elnet$bestTune
+
+# Compute the prediction error on the training set
+train_enet <- glmnet(xs, status, type.measure = "class", family = "binomial", alpha = def_elnet$results[max_acc,1], lambda = def_elnet$results[max_acc,2])
+
+train_enet
+
+# Model coefficients
+coef(def_elnet$finalModel, def_elnet$bestTune$lambda)
+
+# Make predictions using testing dataset
+predictions <- def_elnet %>% predict(tumor_testSA)
+
+# Confusion matrix of expected by predicted results as well as metric of Accuracy, Sensitivity and Specificity. 
+confusionMatrix(table(predictions, as.vector(tumor_testSA$status)))
+
+```
+The model was accurate in its classification 94.12 % of the time. Overall, the results of elastic net indicate that ridge regression be maintained to maximize prediction accuracy.
+
+
+## KNN (Lisa)
+Test for k=3, to see the accuracy, then test again with quadratic effects 
+
+```{r}
+
+## KNN Model
+
+# Set the seed for reproducibility
+set.seed(123)
+
+# Separate the response variable from the predictors
+train.X <- tumor_train[, -1]
+train.Direction <- tumor_train[, 1]
+test.X <- tumor_test[, -1]
+test.Direction <- tumor_test[, 1]
+
+# Set the seed for reproducibility
+set.seed(123)
+
+# Set status
+train_status <- tumor_train$status
+test_status <- tumor_test$status
+
+# Fit the model to knn() function with k=3
+knn.pred <- knn(train = train.X, test = test.X, cl = train_status, k = 3)
+
+#Create a confusion matrix
+confusion_matrix <- table(knn.pred, test_status)
+
+# Print the confusion matrix
+print(confusion_matrix)
+
+# Calculate the accuracy, sensitivity, and specificity of the model
+accuracy <- (sum(diag(confusion_matrix)) / sum(confusion_matrix))*100
+sensitivity <- (confusion_matrix[2,2]/ (confusion_matrix[2,1] + confusion_matrix[2,2]))*100
+specificity <- (confusion_matrix[1,1] / (confusion_matrix[1,1] + confusion_matrix[1,2])) * 100
+
+# Print the sensitivity and specificity of the model
+cat("\nAccuracy:", round(accuracy, 2))
+cat("\nSensitivity:", round(sensitivity, 2))
+cat("\nSpecificity:", round(specificity, 2))
+
+# After increasing the k value from 1 to 10, the accuracy increased from 0.92 to 0.94.
+# Adding quadratic effects
+# Quadratic dataset
+train.Xsq <- train.X^2
+test.Xsq <- test.X^2
+
+# Combine original squared predictors variable into new df
+train.X_all <- cbind(train.X, train.Xsq)
+test.X_all <- cbind(test.X, test.Xsq)
+
+# Fit KNN model to new df
+knn.pred_all <- knn(train=train.X_all, test=test.X_all, cl= train_status, k=3)
+
+# Create CM
+# k=3
+CM_all <- table(knn.pred_all, test_status)
+
+# Calculate accuracy, sensitivity, specificity after using quadratic effects
+accuracy_sq <- (sum(diag(CM_all)) / sum(CM_all))*100
+sensitivity_sq <- (CM_all[2,2]/ (CM_all[2,1] + CM_all[2,2]))*100
+specificity_sq <- (CM_all[1,1] / (CM_all[1,1] + CM_all[1,2])) * 100
+
+# Print the sensitivity and specificity of the model
+print(CM_all)
+cat("\nAccuracy:", round(accuracy_sq, 2))
+cat("\nSensitivity:", round(sensitivity_sq, 2))
+cat("\nSpecificity:", round(specificity_sq, 2))
+
+# Calculate feature importance based on reduction in accuracy when each feature is removed from the model. The higher the reduction in accuracy, the more important of the feature
+# k=3
+importance_1 <- c()
+for (i in 1:ncol(train.X_all)) {
+  train.X_all_temp <- train.X_all[,-i]
+  test.X_all_temp <- test.X_all[,-i]
+  knn.pred_temp <- knn(train = train.X_all_temp, test = test.X_all_temp, cl = train_status, k = 1)
+  CM_temp <- table(knn.pred_temp, test_status)
+  accuracy_temp <- (sum(diag(CM_temp)) / sum(CM_temp))*100
+  importance_1[i] <- accuracy_sq - accuracy_temp
+}
+
+# create a data frame to store the feature names and their importance scores
+importance_df <- data.frame(feature = names(train.X_all), importance_score = importance_1)
+
+# sort the data frame by importance score in descending order
+importance_df <- importance_df[order(importance_df$importance_score, decreasing = TRUE),]
+
+# print the top 5 most important features
+cat("Top 5 most important features:\n")
+print(head(importance_df, n = 5), row.names = FALSE)
+
+# Create a bar plot to compare the performance of the two models
+accuracy_data <- data.frame(Model = c("KNN (k=3)", "KNN (k=3) with quadratic effects"),
+                            Accuracy = c(accuracy, accuracy_sq),
+                            Sensitivity = c(sensitivity, sensitivity_sq),
+                            Specificity = c(specificity, specificity_sq))
+
+library(ggplot2)
+library(tidyr)
+
+accuracy_data_long <- gather(accuracy_data, "Metric", "Score", -Model)
+
+ggplot(accuracy_data_long, aes(x = Model, y = Score, fill = Metric)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Performance of KNN models",
+       subtitle = "Comparison of models with and without quadratic effects",
+       x = "Model", y = "Score (%)") +
+  scale_fill_manual(values = c("#00AFBB", "#E7B800", "#FC4E07")) +
+  theme_minimal()
+```
+K-nearest neighbors (KNN) classification was used as a non-parametric method in statistical learning. The k value is a hyperparameter that determines the number of nearest neighbors in the training set used to assign a test observation to a class. The model was fitted to the knn() function with k=3. To evaluate the performance of the model, a confusion matrix was created, and the accuracy, sensitivity, and specificity were calculated, which yielded an accuracy of 91.76%, sensitivity of 87.5%, and specificity of 93.44%. 
+Next, quadratic effects were incorporated into the model, resulting in an improvement in classification performance. The accuracy of the model increased to 92.94%, sensitivity to 88%, and specificity to 95%. This result is expected since KNN is a non-parametric algorithm that relies on calculating distances between the data points to make predictions, so when the quadratic effects are added, they can help to capture non-linear relationships between variables and help improve the accuracy of the KNN models. 
+To identify the most important features, feature importance scores were calculated based on the reduction in accuracy when each feature was removed from the model. The top five most important features were X24, X1, X2, X3, and X4, with importance scores of 5.882353, 4.705882, 4.705882, 4.705882, and 4.705882, respectively. Overall, these results suggest that the inclusion of quadratic effects led to an improvement in the model's performance. The feature importance analysis also revealed that X24 was the most important feature in the classification task, highlighting its crucial role in predicting the outcome.
+
+## a fully grown classification/regression tree (CART) (Saira)
+
+The training set is used to build a classification trees. The rpart function takes in a model with the status as the response and the 30 variables as predictors. The model is very accurate, with 90.59% of predicted classification being same as observed.
+
+```{r}
+
+# Fitting a classification tree to tumor dataset
+class_tree <- rpart(status ~ ., data=tumor_trainSA, method = "class")
+
+# summary of classification tree
+summary(class_tree)
+
+# Figure # : Visualizing the unpruned classification tree consisting of relevant predictors to classify tumor status 
+rpart.plot(class_tree)
+
+# Checking the importance of key predictors to the classification tree
+class_tree$variable.importance
+
+# Checking model fit on testing dataset
+pred_tree = predict(class_tree, tumor_testSA[2:61], type = "class")
+
+
+# Confusion matrix of expected by predicted results as well as metric of Accuracy, Sensitivity and Specificity. 
+confusionMatrix(table(pred_tree,tumor_testSA$status))
+
+# Accuracy : 0.9059
+# Sensitivity : 0.8833          
+# Specificity : 0.9600 
+
+```
+
+We can also check if pruning the tree will improve results. Pruning selects the cp (complexity parameter) value associated with a shorter tree that minimizes the cross-validated error rate (xerror). 
+
+```{r}
+# Checking if pruning will improve results 
+printcp(class_tree)
+
+# Explicitly request the lowest complexity parameter (cp) value
+bestcp <- class_tree$cptable[which.min(class_tree$cptable[,"xerror"]),"CP"]
+pruned_tree <- prune(class_tree, cp = bestcp)
+rpart.plot(pruned_tree)
+
+# Pruned model has 9 important predictors, the unpruned tree used 11.
+pruned_tree$variable.importance 
+
+
+# Alternate specification 
+pred_prune = predict(pruned_tree, tumor_testSA[-1], type="class")
+
+# Accuracy, Specificity and Sensitivity reuslts are almost the same as before
+# No significant change is made when the tree is pruned
+confusionMatrix(table(pred_prune,tumor_testSA$status))
+
+```
+There is no change in classification after pruning the tree. This suggests that pruning is not necessary for this tree
+
+
+## support vector machine (Lisa)
+
+```{r}
+## SVM 
+# Select only the numeric columns from the training set
+x <- tumor_train[,-1]
+y <- tumor_train[,1]
+
+# Create a data frame with x and y columns
+dat <- data.frame(x=x, y=as.factor(y))
+
+# Train a support vector machine (SVM) with a linear kernel on the training data
+svmfit <- svm(y~., data=dat, kernel="linear", cost =0.1, scale=FALSE)
+
+# Tune the SVM hyperparameters using cross-validation on the training data
+set.seed(1)
+tune.out <- tune(svm, y ~ ., data=dat, kernel='linear', ranges=list(cost = c(0.001, 0.01, 0.1, 1, 3,5,10,100)))
+
+# Print a summary of the tuning results
+summary(tune.out)
+
+# Extract the best performing SVM model from the tuning results
+bestmod <- tune.out$best.model
+summary(bestmod)
+
+# Select only the numeric columns from the test set
+xtest <- tumor_test[,-1]
+ytest <- tumor_test[,1]
+
+# Create a data frame with xtest and ytest columns
+testdat <- data.frame(x=xtest, y= as.factor(ytest))
+
+# Use the best SVM model to predict the target variable for the test data
+ypred <- predict(bestmod, testdat)
+
+# Create a confusion matrix and calculate accuracy
+CM <- table(ypred, testdat$y)
+accuracy <- (sum(diag(CM)) / sum(CM))*100
+sensitivity <- (CM[2,2]/ (CM[2,1] + CM[2,2]))*100
+specificity <- (CM[1,1] / (CM[1,1] + CM[1,2])) * 100
+
+# Print the confusion matrix and accuracy
+print(CM)
+cat("\nAccuracy:", round(accuracy, 2))
+cat("\nSensitivity:", round(sensitivity, 2))
+cat("\nSpecificity:", round(specificity, 2))
+
+# Adding quadratic terms for each feature
+x2 <- apply(x, 2, poly, degree=2, raw=TRUE)
+
+# Create a new data frame with quadratic terms
+dat2 <- data.frame(x2, y=as.factor(y)) 
+
+# Train a support vector machine (SVM) with a linear kernel on the training data with quadratic terms
+svmfit2 <- svm(y~., data=dat2, kernel="linear", cost=0.1, scale=FALSE)
+
+# Tune the SVM hyperparameters using cross-validation on the training data with quadratic terms
+set.seed(2)
+tune.out2 <- tune(svm, y~., data=dat2, kernel="linear", ranges=list(cost = c(0.001, 0.01, 0.1, 1, 3,5,10,100)))
+
+# Print a summary of the tuning results with quadratic terms
+summary(tune.out2)
+
+# Extract the best performing SVM model from the tuning results with quadratic terms
+bestmod2 <- tune.out2$best.model
+summary(bestmod2)
+
+# Add quadratic terms for each feature in the test data
+xtest2 <- apply(xtest, 2, poly, degree=2, raw=TRUE)
+testdat2 <- data.frame(xtest2, y = as.factor(ytest))
+
+# Use the best SVM model to predict the target variable for the test data with quadratic terms
+ypred2 <- predict(bestmod2, testdat2)
+
+# Create a confusion matrix and calculate accuracy with quadratic terms
+CM2 <- table(ypred2, testdat2$y)
+accuracy2 <- (sum(diag(CM2)) / sum(CM2))*100
+sensitivity2 <- (CM2[2,2]/ (CM2[2,1] + CM2[2,2]))*100
+specificity2 <- (CM2[1,1] / (CM2[1,1] + CM2[1,2])) * 100
+
+# Print the confusion matrix and accuracy with quadratic terms
+print(CM2)
+cat("\nAccuracy:", round(accuracy2, 2))
+cat("\nSensitivity:", round(sensitivity2, 2))
+cat("\nSpecificity:", round(specificity2, 2))
+
+# Calculate feature importance based on decrease in accuracy when each feature is removed
+importance2 <- data.frame(feature = character(ncol(dat2[, 2:31])), importance = numeric(ncol(dat2[, 2:31])))
+for (i in 1:ncol(dat2[, 2:31])) {
+  dat2_temp <- dat2[, -i]
+  svmfit2_temp <- svm(y ~ ., data = dat2_temp, kernel = "linear", cost = 0.1, scale = FALSE)
+  ypred2_temp <- predict(svmfit2_temp, testdat2)
+  CM2_temp <- table(ypred2_temp, testdat2$y)
+  accuracy2_temp <- (sum(diag(CM2_temp)) / sum(CM2_temp)) * 100
+  importance2$importance[i] <- accuracy2 - accuracy2_temp
+  importance2$feature[i] <- colnames(dat2)[i]
+}
+
+# Rank features by importance and highlight top 5
+ranked_importance2 <- importance2[order(importance2$importance, decreasing = TRUE), ]
+top_5_2 <- ranked_importance2$feature[1:5]
+cat("\nTop 5 most important features (including quadratic effects):\n")
+cat(top_5_2, sep = "\n")
+
+# View importance scores for all features
+print(head(ranked_importance2, n = 5), row.names = FALSE)
+
+```
+Support Vector Machines (SVM) is based on the idea of finding a hyperplane in a high-dimensional space that maximally separates different classes of data points. The objective of SVM is to find the best boundary or hyperplane that can correctly classify new data points based on their features. In this study, SVM is trained on linear kernels. The hyperparameters of the SVM were optimized by performing 10-fold cross-validation on the training data. The training data was also used to train the SVM with quadratic terms for each feature. Accuracy, sensitivity, and specificity were used to evaluate the performance of the SVM on the test data.
+The best performing linear SVM was obtained with a cost parameter of 0.01, resulting in an accuracy of 97.65%. The model achieved a sensitivity of 100% and a specificity of 96.77%. After adding quadratic effects, the SVM trained with quadratic terms for each feature achieved an accuracy of 94.12% with the best cost parameter of 3. The sensitivity and specificity of the model were 91.67% and 95.08%, respectively. The most important feature is X1, with an importance score of 72.94%, followed by X9 (51.76%), X4 (43.53%), X8 (42.94%), and X28 (38.82%). 
+Overall, it was observed that the linear SVM without quadratic terms performed the best on the test set, with a higher accuracy than the SVM with quadratic terms. This result is expected since the accuracy, sensitivity and specificity of the model without quadratic effects were already very accurate, adding the quadratic effects may increase the complexity of the SVM model by introducing more variables and a non-linear decision boundary leading to overfitting, therefore decreasing accuracy. 
+
+## a bagged version of CART (Zee)
+```{r}
+##bagging regression trees with 150 bootstrap replications
+nbagg_values<-c(100, 150, 200, 300, 400, 500)
+set.seed(123)
+for (nbagg in nbagg_values){bag<-bagging(status~., data=tumor_train, nbagg=nbagg, coob=T)
+print(paste0("OOB with ", nbagg, " bags: ", bag$err))
+}
+#lowest OOB with bags=100
+set.seed(123)
+bag<-bagging(status~., data=tumor_train, nbagg=100, coob=T)
+bag
+#Out-of-bag estimate of misclassification error:  0.0455
+bag_CART_pred<-predict(bag, newdata=tumor_test, type="class")
+
+#confusion matrix with testing data
+confusionMatrix(table(bag_CART_pred,tumor_test$status))
+#Accuracy=92.94%
+#Sensitivity=93.33%
+#Specificity=92%
+
+#### quadratic effects
+#square all predictors and add as new columns
+train_squared<- data.frame(lapply(tumor_train[2:31], function(x) cbind(x, (x^2))))
+#add status column to above dataframe
+train_squared$status<-tumor_train$status
+#do the same to test data
+test_squared<- data.frame(lapply(tumor_test[2:31], function(x) cbind(x, (x^2))))
+test_squared$status<-tumor_test$status
+#for reproducibility 
+set.seed(213)
+#test all nbag values for model listed above
+for (nbagg in nbagg_values){bag_squared<-bagging(status~., data=train_squared, nbagg=nbagg, coob=T)
+print(paste0("OOB with ", nbagg, " bags: ", bag_squared$err))
+}
+#lowest error obtained =0.0434 with nbagg=200
+set.seed(213)
+bag_quadratic<-bagging(status~., data=train_squared, nbagg=200, coob=T)
+bag_CART_squared_pred<-predict(bag_quadratic, newdata=test_squared, type="class")
+confusionMatrix(table(bag_CART_squared_pred,test_squared$status))
+#Accuracy=91.67%
+#Sensitivity=91.67%
+#Specificity=92%
+#non quadratic model has a higher accuracy sensitivity and roughly the same specificity
+
+#most important predicting features in regular model
+head(varImp(bag), 5)
+#most important features in quadratic model
+head(varImp(bag_quadratic), 5)
+```
+
+## random forests. (Zee)
+```{r}
+
+#Tuning random forest model
+#for reproducible results
+set.seed(751)
+#tuning parameters for random forest
+##tuning mtry=Number randomely variable selected
+control <- trainControl(method='cv', 
+                        number=10)
+mtry <- sqrt(ncol(tumor_train[2:31]))
+tunegrid <- expand.grid(.mtry=mtry)
+rf_default <- train(status~., 
+                      data=tumor_train, 
+                      method='rf', 
+                      metric='Accuracy', 
+                      tuneGrid=tunegrid, 
+                      trControl=control)
+print(rf_default) #Accuracy of 95.86% at a value of 5.477226
+
+##tuning ntree values=number of tree split at each node
+set.seed(751)
+ntree_values<-c(50, 100, 150, 200, 300, 400, 500)
+for (ntree in ntree_values) {
+  rf_model <- randomForest(status ~ ., 
+                            data = tumor_train, 
+                            ntree = ntree, mtry=5.477226)
+print(paste0("ntree =", ntree, " | OOB error =", round(rf_model$err.rate[ntree, "OOB"], 4)))
+}
+
+#highest accuracy at ntree=150 of 96.69%
+set.seed(751)
+randomforest_model<-randomForest(status ~ ., data = tumor_train, ntree = 500, mtry=5.477226)
+#testing the model on unseen data
+randomforest_test <- predict(randomforest_model, newdata = tumor_test, type= "class")
+
+#Confusion matrix
+confusionMatrix(table(randomforest_test,tumor_test$status)) 
+###Accuracy= 94.12%
+##Sensitivity= 95%
+##Specificity= 92%
+
+##quadratic effects
+set.seed(751)
+control <- trainControl(method='cv', 
+                        number=10)
+mtry <- sqrt(ncol(train_squared[1:60]))
+tunegrid <- expand.grid(.mtry=mtry)
+rf_default <- train(status~., 
+                      data=train_squared, 
+                      method='rf', 
+                      metric='Accuracy', 
+                      tuneGrid=tunegrid, 
+                      trControl=control)
+print(rf_default) #Accuracy of 96.71% at a value of 7.745967
+set.seed(751)
+ntree_values<-c(50, 100, 150, 200, 300, 400, 500)
+for (ntree in ntree_values) {
+  rf_model <- randomForest(status ~ ., 
+                            data = train_squared, 
+                            ntree = ntree, mtry=7.745967)
+print(paste0("ntree =", ntree, " | OOB error =", round(rf_model$err.rate[ntree, "OOB"], 4)))
+}
+#lowest OOb with 50 trees
+set.seed(751)
+randomforest_model1<-randomForest(status~., data=train_squared, mtry=7.745967, ntree=50)
+randomforest_test1 <- predict(randomforest_model1, newdata = test_squared, type= "class")
+
+#Confusion matrix
+confusionMatrix(table(randomforest_test,test_squared$status)) 
+#Accuracy=92.94%
+#Sensitivity=95%
+#Specificity=88%
+
+#most important predicting features in regular model
+head(varImp(randomforest_model), 5)
+#most important features in quadratic model
+head(varImp(randomforest_model1), 5)
+```
+
+## Final table 
+
+```{r}
+tab <- matrix( ncol=3, nrow=6,byrow=TRUE)
+rownames(tab) <- c("Elastic Net", "KNN", "CART", "SVM", "Bagged CART", "Random Forest")
+colnames(tab) <- c("Acc", "Specificity", "Sensitivity")
+
+tab[1,] <- c(94.12, 80.00, 100)
+tab[2,] <- c(91.76, 93.44, 87.50)
+tab[3,] <- c(90.59, 96.00, 88.33 )
+tab[4,] <- c(97.65, 100, 96.77)
+tab[5,] <- c(92.94,92, 93.33)
+tab[6,] <- c(94.12, 92, 95)
+tab
+```
+
